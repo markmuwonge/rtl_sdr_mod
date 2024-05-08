@@ -12,6 +12,11 @@ import (
 
 	"github.com/go-cmd/cmd"
 	"github.com/trailofbits/go-mutexasserts"
+
+	"math"
+	"math/cmplx"
+
+	"github.com/pa-m/numgo"
 )
 
 type RtlSdr struct {
@@ -25,6 +30,7 @@ type RtlSdr struct {
 var (
 	SampleBytesRetrievalTimeout    = errors.New("Sample bytes retrieval timeout")
 	SampleBytesRetrievalInProgress = errors.New("Sample bytes retrieval in progress")
+	np                             = numgo.NumGo{}
 )
 
 func Test() string {
@@ -140,4 +146,42 @@ func (rtl_sdr *RtlSdr) GetSamplesAsBytes(frequency_hz uint, sample_rate_hz uint,
 
 	rtl_sdr.bytes_read += uint(len(bytes))
 	return bytes, nil
+}
+
+func DetectPulse(bytes []byte, previous_power_dbm float64, min_pulse_db float64) (bool, float64) {
+	detected := false
+	power_dbm := math.Inf(0)
+
+	complexes := make([]complex128, 0)
+
+	//ref IQArray: convert_to (Universal Radio Hacker) uint8 to int8
+	for i := 0; i < len(bytes); i += 2 {
+		complexes = append(complexes, complex(float64(bytes[i])-128, float64(bytes[i+1])-128))
+	}
+
+	magnitudes := make([]float64, 0)
+	for _, c := range complexes {
+		magnitudes = append(magnitudes, cmplx.Abs(c))
+	}
+
+	//ref IQArray: magnitudes_normalized (Universal Radio Hacker)
+	normalized_magnitudes := make([]float64, 0)
+	for _, m := range magnitudes {
+		normalized_magnitudes = append(normalized_magnitudes, m/math.Hypot(math.MaxInt8, math.MinInt8))
+	}
+
+	average_magnitude := np.Mean(normalized_magnitudes)
+
+	// ref SignalFrame:update_number_selected_samples (Universal Radio Hacker)
+	if average_magnitude > 0 {
+		power_dbm = 10 * math.Log10(average_magnitude)
+	}
+
+	if !(math.IsInf(previous_power_dbm, 0) || math.IsInf(power_dbm, 0)) {
+		db := 10 * math.Log10(previous_power_dbm/power_dbm)
+		if !math.Signbit(db) && db > min_pulse_db { //power increase
+			detected = true
+		}
+	}
+	return detected, power_dbm
 }
